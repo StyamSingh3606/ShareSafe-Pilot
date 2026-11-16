@@ -1,11 +1,12 @@
-import { scrypt, timingSafeEqual } from 'node:crypto';
+import { randomBytes, scrypt, timingSafeEqual } from 'node:crypto';
 import { promisify } from 'node:util';
 
 const derive = promisify(scrypt);
 export const hosted = process.env.NODE_ENV === 'production';
 export const origin = process.env.PUBLIC_ORIGIN ?? process.env.RENDER_EXTERNAL_URL ?? '';
 export const account = process.env.SENDER_EMAIL?.trim().toLowerCase() ?? '';
-const [salt, digest] = (process.env.SENDER_PASSWORD_HASH ?? '').split(':');
+const operatorPasswordHash = process.env.SENDER_PASSWORD_HASH ?? '';
+const [salt, digest] = operatorPasswordHash.split(':');
 
 export function checkHostedConfig() {
   if (!hosted) return;
@@ -17,9 +18,16 @@ export function checkHostedConfig() {
       !process.env.ANDROID_INSTALL_URL?.startsWith('https://')) throw new Error('Incomplete hosted configuration');
 }
 
-export async function checkPassword(email: string, password: string) {
+export async function hashPassword(password: string) {
+  const salt = randomBytes(16);
+  const digest = await derive(password, salt, 64) as Buffer;
+  return salt.toString('hex') + ':' + digest.toString('hex');
+}
+
+export async function checkPassword(password: string, storedHash?: string) {
+  const [salt, digest] = (storedHash ?? operatorPasswordHash).split(':');
   const candidate = await derive(password, Buffer.from(salt, 'hex'), 64) as Buffer;
-  return timingSafeEqual(candidate, Buffer.from(digest, 'hex')) && email.trim().toLowerCase() === account;
+  return timingSafeEqual(candidate, Buffer.from(digest, 'hex'));
 }
 
 export function supportsDestination(destination: string) {

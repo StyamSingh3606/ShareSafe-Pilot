@@ -3,7 +3,7 @@ import pg from 'pg';
 import { readFile } from 'node:fs/promises';
 import { createCipheriv, createDecipheriv, createHash, createHmac, randomBytes, randomInt, timingSafeEqual } from 'node:crypto';
 import { unzipSync } from 'fflate';
-import { account, checkHostedConfig, checkPassword, deliver, hosted, origin, supportsDestination } from './hosted.js';
+import { account, checkHostedConfig, checkPassword, deliver, hashPassword, hosted, origin, supportsDestination } from './hosted.js';
 
 const app = Fastify({ bodyLimit: 36_000_000, logger: false });
 const db = new pg.Pool({ connectionString: process.env.DATABASE_URL });
@@ -70,15 +70,37 @@ async function sender(authorization: string | undefined): Promise<string | undef
   return (await db.query('SELECT owner FROM sender_sessions WHERE token=$1 AND expires_at>now()', [hash(bearer)])).rows[0]?.owner;
 }
 if (hosted) {
+  const registrationCode = process.env.SENDER_REGISTRATION_CODE ?? '';
+  app.post('/sender/register', { bodyLimit: 4096 }, async (req, reply) => {
+    if (registrationCode.length < 24) return reply.code(403).send({ error: 'Registration is closed' });
+    const { email, password, inviteCode } = (req.body ?? {}) as Record<string, unknown>;
+    if (typeof email !== 'string' || email.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim()) ||
+        typeof password !== 'string' || password.length < 12 || password.length > 256 ||
+        typeof inviteCode !== 'string' || inviteCode.length > 256)
+      return reply.code(400).send({ error: 'Enter an email, an invitation code, and a password of at least 12 characters' });
+    if (!(await allowRequest('register:' + hash(req.ip), 10)))
+      return reply.code(429).send({ error: 'Too many registration attempts. Try again later.' });
+    if (!timingSafeEqual(Buffer.from(hash(inviteCode)), Buffer.from(hash(registrationCode))))
+      return reply.code(403).send({ error: 'Registration invitation is invalid' });
+    const owner = email.trim().toLowerCase();
+    if (owner === account) return reply.code(409).send({ error: 'Account already exists. Sign in instead.' });
+    const result = await db.query('INSERT INTO sender_accounts(email,password_hash) VALUES($1,$2) ON CONFLICT DO NOTHING', [owner, await hashPassword(password)]);
+    if (!result.rowCount) return reply.code(409).send({ error: 'Account already exists. Sign in instead.' });
+    return reply.code(201).send({ created: true });
+  });
   app.post('/sender/login', async (req, reply) => {
     const { email, password } = (req.body ?? {}) as Record<string, unknown>;
     if (typeof email !== 'string' || email.length > 254 || typeof password !== 'string' || password.length > 256)
       return reply.code(400).send({ error: 'Enter your email and password' });
     if (!(await allowRequest('login:' + hash(req.ip), 10)) || !(await allowRequest('login:account', 60)))
       return reply.code(429).send({ error: 'Too many sign-in attempts. Try again later.' });
-    if (!(await checkPassword(email, password))) return reply.code(401).send({ error: 'Sign-in failed' });
+    const owner = email.trim().toLowerCase();
+    const stored = owner === account ? undefined :
+      (await db.query('SELECT password_hash FROM sender_accounts WHERE email=$1', [owner])).rows[0]?.password_hash as string | undefined;
+    const matches = await checkPassword(password, stored);
+    if (!matches || (owner !== account && !stored)) return reply.code(401).send({ error: 'Sign-in failed' });
     const session = token();
-    await db.query("INSERT INTO sender_sessions VALUES($1,$2,now()+interval '1 hour')", [hash(session), account]);
+    await db.query("INSERT INTO sender_sessions VALUES($1,$2,now()+interval '1 hour')", [hash(session), owner]);
     return { session };
   });
   app.get('/.well-known/assetlinks.json', async () => [{
@@ -219,6 +241,7 @@ app.get<{Params:{invite:string; action:string}}>('/receive/:invite/content/:acti
 });
 await db.query(await readFile(new URL('../migrations/001.sql', import.meta.url), 'utf8'));
 await db.query(await readFile(new URL('../migrations/002.sql', import.meta.url), 'utf8'));
+await db.query(await readFile(new URL('../migrations/003.sql', import.meta.url), 'utf8'));
 setInterval(() => {
   void db.query("DELETE FROM sender_sessions WHERE expires_at <= now()").catch(() => {});
   void db.query("DELETE FROM request_windows WHERE opened_at < now()-interval '1 hour'").catch(() => {});
