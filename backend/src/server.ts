@@ -70,70 +70,92 @@ async function sender(authorization: string | undefined): Promise<string | undef
   return (await db.query('SELECT owner FROM sender_sessions WHERE token=$1 AND expires_at>now()', [hash(bearer)])).rows[0]?.owner;
 }
 if (hosted) {
-  const registrationDigest = (challenge: string, email: string, code: string) =>
-    createHmac('sha256', otpSecret).update(JSON.stringify(['sender-registration', challenge, email, code])).digest();
+  const registrationDigest = (purpose: string, challenge: string, email: string, code: string) =>
+    createHmac('sha256', otpSecret).update(JSON.stringify(['sender-' + purpose, challenge, email, code])).digest();
 
-  app.post('/sender/register/code', { bodyLimit: 4096 }, async (req, reply) => {
-    const { email } = (req.body ?? {}) as Record<string, unknown>;
-    if (typeof email !== 'string' || email.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim()))
-      return reply.code(400).send({ error: 'Enter a valid email address' });
-    const owner = email.trim().toLowerCase();
-    if (!(await allowRequest('registration:request:ip:' + hash(req.ip), 20)) ||
-        !(await allowRequest('registration:request:email:' + hash(owner), 3)))
-      return reply.code(429).send({ error: 'Too many code requests. Try again in 15 minutes.' });
-    const exists = await db.query('SELECT 1 FROM sender_accounts WHERE email=$1', [owner]);
-    if (owner === account || exists.rowCount)
-      return reply.code(409).send({ error: 'This email already has an account. Sign in instead.' });
+  for (const [path, purpose] of [['register', 'registration'], ['reset-password', 'password-reset']] as const) {
+    const reset = purpose === 'password-reset';
+    app.post('/sender/' + path + '/code', { bodyLimit: 4096 }, async (req, reply) => {
+      const { email } = (req.body ?? {}) as Record<string, unknown>;
+      if (typeof email !== 'string' || email.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim()))
+        return reply.code(400).send({ error: 'Enter a valid email address' });
+      const owner = email.trim().toLowerCase();
+      if (!(await allowRequest(purpose + ':request:ip:' + hash(req.ip), 20)) ||
+          !(await allowRequest(purpose + ':request:email:' + hash(owner), 3)))
+        return reply.code(429).send({ error: 'Too many code requests. Try again in 15 minutes.' });
+      const exists = await db.query('SELECT 1 FROM sender_accounts WHERE email=$1', [owner]);
+      const known = owner === account || Boolean(exists.rowCount);
+      if (!reset && known)
+        return reply.code(409).send({ error: 'This email already has an account. Sign in instead.' });
 
-    const challenge = token();
-    const id = hash(challenge);
-    const code = String(randomInt(1_000_000)).padStart(6, '0');
-    await db.query("INSERT INTO sender_registration_challenges(id,email,verifier,expires_at) VALUES($1,$2,$3,now()+interval '5 minutes')",
-      [id, owner, registrationDigest(challenge, owner, code)]);
-    try {
-      await deliver(owner, 'Verify your ShareSafe email', 'Your ShareSafe registration verification code is ' + code + '. It expires in five minutes. Enter it only in ShareSafe.', 'registration-' + id);
-    } catch {
-      await db.query('DELETE FROM sender_registration_challenges WHERE id=$1', [id]);
-      return reply.code(503).send({ error: 'Could not send a verification code to this email. Check the address and try again.' });
-    }
-    return { challenge };
-  });
-
-  app.post('/sender/register', { bodyLimit: 4096 }, async (req, reply) => {
-    const { challenge, code, password } = (req.body ?? {}) as Record<string, unknown>;
-    if (typeof challenge !== 'string' || !/^[\w-]{43}$/.test(challenge) ||
-        typeof code !== 'string' || !/^\d{6}$/.test(code) ||
-        typeof password !== 'string' || password.length < 12 || password.length > 256)
-      return reply.code(400).send({ error: 'Enter a six-digit code and a password of at least 12 characters' });
-    if (!(await allowRequest('registration:verify:ip:' + hash(req.ip), 60)))
-      return reply.code(429).send({ error: 'Too many verification attempts. Try again in 15 minutes.' });
-
-    const id = hash(challenge);
-    const client = await db.connect();
-    try {
-      await client.query('BEGIN');
-      const result = await client.query("SELECT email,verifier FROM sender_registration_challenges WHERE id=$1 AND attempts<5 AND expires_at>now() FOR UPDATE", [id]);
-      const row = result.rows[0];
-      if (!row || !timingSafeEqual(row.verifier, registrationDigest(challenge, row.email, code))) {
-        if (row) await client.query('UPDATE sender_registration_challenges SET attempts=attempts+1 WHERE id=$1', [id]);
-        await client.query('COMMIT');
-        return reply.code(403).send({ error: 'Code is incorrect or has expired.' });
+      const challenge = token();
+      if (reset && !known) return { challenge };
+      const id = hash(challenge);
+      const code = String(randomInt(1_000_000)).padStart(6, '0');
+      await db.query("INSERT INTO sender_registration_challenges(id,email,verifier,expires_at,purpose) VALUES($1,$2,$3,now()+interval '5 minutes',$4)",
+        [id, owner, registrationDigest(purpose, challenge, owner, code), purpose]);
+      try {
+        await deliver(owner, reset ? 'Reset your ShareSafe password' : 'Verify your ShareSafe email',
+          'Your ShareSafe ' + (reset ? 'password reset' : 'registration verification') + ' code is ' + code +
+          '. It expires in five minutes. Enter it only in ShareSafe.', purpose + '-' + id);
+      } catch {
+        await db.query('DELETE FROM sender_registration_challenges WHERE id=$1', [id]);
+        if (!reset) return reply.code(503).send({ error: 'Could not send a verification code to this email. Check the address and try again.' });
       }
-      const inserted = row.email === account ? null : await client.query(
-        'INSERT INTO sender_accounts(email,password_hash) VALUES($1,$2) ON CONFLICT DO NOTHING',
-        [row.email, await hashPassword(password)],
-      );
-      await client.query('DELETE FROM sender_registration_challenges WHERE id=$1', [id]);
-      await client.query('COMMIT');
-      if (!inserted?.rowCount) return reply.code(409).send({ error: 'This email already has an account. Sign in instead.' });
-      return reply.code(201).send({ created: true });
-    } catch (error) {
-      await client.query('ROLLBACK');
-      throw error;
-    } finally {
-      client.release();
-    }
-  });
+      return { challenge };
+    });
+
+    app.post('/sender/' + path, { bodyLimit: 4096 }, async (req, reply) => {
+      const { challenge, code, password } = (req.body ?? {}) as Record<string, unknown>;
+      if (typeof challenge !== 'string' || !/^[\w-]{43}$/.test(challenge) ||
+          typeof code !== 'string' || !/^\d{6}$/.test(code) ||
+          typeof password !== 'string' || password.length < 12 || password.length > 256)
+        return reply.code(400).send({ error: 'Enter a six-digit code and a password of at least 12 characters' });
+      if (!(await allowRequest(purpose + ':verify:ip:' + hash(req.ip), 60)))
+        return reply.code(429).send({ error: 'Too many verification attempts. Try again in 15 minutes.' });
+
+      const id = hash(challenge);
+      const client = await db.connect();
+      try {
+        await client.query('BEGIN');
+        if (reset) {
+          const owner = (await client.query('SELECT email FROM sender_registration_challenges WHERE id=$1 AND purpose=$2', [id, purpose])).rows[0]?.email;
+          if (owner) await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [owner]);
+        }
+        const result = await client.query("SELECT email,verifier FROM sender_registration_challenges WHERE id=$1 AND purpose=$2 AND attempts<5 AND expires_at>now() FOR UPDATE", [id, purpose]);
+        const row = result.rows[0];
+        if (!row || !timingSafeEqual(row.verifier, registrationDigest(purpose, challenge, row.email, code))) {
+          if (row) await client.query('UPDATE sender_registration_challenges SET attempts=attempts+1 WHERE id=$1', [id]);
+          await client.query('COMMIT');
+          return reply.code(403).send({ error: 'Code is incorrect or has expired.' });
+        }
+        if (reset) {
+          const passwordHash = await hashPassword(password);
+          await client.query(
+            'INSERT INTO sender_accounts(email,password_hash) VALUES($1,$2) ON CONFLICT(email) DO UPDATE SET password_hash=EXCLUDED.password_hash',
+            [row.email, passwordHash],
+          );
+          await client.query('DELETE FROM sender_sessions WHERE owner=$1', [row.email]);
+          await client.query('DELETE FROM sender_registration_challenges WHERE email=$1 AND purpose=$2', [row.email, purpose]);
+          await client.query('COMMIT');
+          return { reset: true };
+        }
+        const inserted = row.email === account ? null : await client.query(
+          'INSERT INTO sender_accounts(email,password_hash) VALUES($1,$2) ON CONFLICT DO NOTHING',
+          [row.email, await hashPassword(password)],
+        );
+        await client.query('DELETE FROM sender_registration_challenges WHERE id=$1', [id]);
+        await client.query('COMMIT');
+        if (!inserted?.rowCount) return reply.code(409).send({ error: 'This email already has an account. Sign in instead.' });
+        return reply.code(201).send({ created: true });
+      } catch (error) {
+        await client.query('ROLLBACK');
+        throw error;
+      } finally {
+        client.release();
+      }
+    });
+  }
   app.post('/sender/login', async (req, reply) => {
     const { email, password } = (req.body ?? {}) as Record<string, unknown>;
     if (typeof email !== 'string' || email.length > 254 || typeof password !== 'string' || password.length > 256)
@@ -141,13 +163,26 @@ if (hosted) {
     if (!(await allowRequest('login:' + hash(req.ip), 10)) || !(await allowRequest('login:account', 60)))
       return reply.code(429).send({ error: 'Too many sign-in attempts. Try again later.' });
     const owner = email.trim().toLowerCase();
-    const stored = owner === account ? undefined :
-      (await db.query('SELECT password_hash FROM sender_accounts WHERE email=$1', [owner])).rows[0]?.password_hash as string | undefined;
-    const matches = await checkPassword(password, stored);
-    if (!matches || (owner !== account && !stored)) return reply.code(401).send({ error: 'Sign-in failed' });
-    const session = token();
-    await db.query("INSERT INTO sender_sessions VALUES($1,$2,now()+interval '1 hour')", [hash(session), owner]);
-    return { session };
+    const client = await db.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [owner]);
+      const stored = (await client.query('SELECT password_hash FROM sender_accounts WHERE email=$1', [owner])).rows[0]?.password_hash as string | undefined;
+      const matches = await checkPassword(password, stored);
+      if (!matches || (owner !== account && !stored)) {
+        await client.query('ROLLBACK');
+        return reply.code(401).send({ error: 'Sign-in failed' });
+      }
+      const session = token();
+      await client.query("INSERT INTO sender_sessions VALUES($1,$2,now()+interval '1 hour')", [hash(session), owner]);
+      await client.query('COMMIT');
+      return { session };
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
   });
   app.get('/.well-known/assetlinks.json', async () => [{
     relation: ['delegate_permission/common.handle_all_urls'],
@@ -289,6 +324,7 @@ await db.query(await readFile(new URL('../migrations/001.sql', import.meta.url),
 await db.query(await readFile(new URL('../migrations/002.sql', import.meta.url), 'utf8'));
 await db.query(await readFile(new URL('../migrations/003.sql', import.meta.url), 'utf8'));
 await db.query(await readFile(new URL('../migrations/004.sql', import.meta.url), 'utf8'));
+await db.query(await readFile(new URL('../migrations/005.sql', import.meta.url), 'utf8'));
 setInterval(() => {
   void db.query("DELETE FROM sender_registration_challenges WHERE expires_at <= now()").catch(() => {});
   void db.query("DELETE FROM sender_sessions WHERE expires_at <= now()").catch(() => {});

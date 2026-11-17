@@ -12,6 +12,11 @@ import pg from 'pg';
 test('Hosted sender login, email invitation, OTP and file download', async () => {
   const provider = process.env.TEST_EMAIL_PROVIDER ?? 'resend';
   assert.ok(process.env.DATABASE_URL, 'Run with the local test database');
+  const schema = 'sharesafe_test_' + randomUUID().replaceAll('-', '');
+  const admin = new pg.Pool({ connectionString: process.env.DATABASE_URL });
+  await admin.query('CREATE SCHEMA ' + schema);
+  const isolatedUrl = new URL(process.env.DATABASE_URL);
+  isolatedUrl.searchParams.set('options', '-c search_path=' + schema);
   const directory = await mkdtemp(join(tmpdir(), 'sharesafe-hosted-'));
   const receipts = join(directory, 'receipts.jsonl');
   const preload = join(directory, 'delivery.mjs');
@@ -38,7 +43,7 @@ test('Hosted sender login, email invitation, OTP and file download', async () =>
   const child = spawn(process.execPath, ['--import', pathToFileURL(preload).href, '--import', 'tsx', 'src/server.ts'], {
     stdio: ['ignore', 'ignore', 'pipe'],
     env: {
-      ...process.env, NODE_ENV: 'production', PORT: '18787', PUBLIC_ORIGIN: publicOrigin,
+      ...process.env, DATABASE_URL: isolatedUrl.href, NODE_ENV: 'production', PORT: '18787', PUBLIC_ORIGIN: publicOrigin,
       TEST_RECEIPTS: receipts, SENDER_EMAIL: email,
       SENDER_PASSWORD_HASH: salt.toString('hex') + ':' + scryptSync(password, salt, 64).toString('hex'),
       EMAIL_PROVIDER: provider,
@@ -50,7 +55,6 @@ test('Hosted sender login, email invitation, OTP and file download', async () =>
   const stopped = once(child, 'exit');
   let diagnostics = '';
   child.stderr?.on('data', chunk => { diagnostics += chunk.toString(); });
-  const database = new pg.Pool({ connectionString: process.env.DATABASE_URL });
   const call = (path: string, body?: unknown, bearer?: string) => fetch(api + path, {
     method: body === undefined ? 'GET' : 'POST', signal: AbortSignal.timeout(4000),
     headers: { ...(body === undefined ? {} : {'Content-Type':'application/json'}), ...(bearer ? {Authorization:'Bearer ' + bearer} : {}) },
@@ -133,14 +137,33 @@ test('Hosted sender login, email invitation, OTP and file download', async () =>
     const download = await call(receive + '/content/download', undefined, result.session);
     assert.equal(download.status, 200);
     assert.deepEqual(Buffer.from(await download.arrayBuffer()), file);
+
+    const unknownReset = await call('/sender/reset-password/code', { email: 'missing-' + randomUUID() + '@example.test' });
+    assert.equal(unknownReset.status, 200);
+    assert.equal((await messages()).length, delivered.length + 1);
+    for (const [owner, previousSession] of [[newEmail, registeredSender], [email, sender]]) {
+      const resetRequest = await call('/sender/reset-password/code', { email: owner });
+      assert.equal(resetRequest.status, 200);
+      const { challenge: resetChallenge } = await resetRequest.json() as { challenge: string };
+      const resetMessage = (await messages()).at(-1);
+      assert.equal(resetMessage.subject, 'Reset your ShareSafe password');
+      assert.deepEqual(resetMessage.to, [owner]);
+      const resetCode = resetMessage.text.match(/\b\d{6}\b/)[0];
+      const newPassword = randomBytes(24).toString('hex');
+      const resetPayload = { challenge: resetChallenge, code: resetCode, password: newPassword };
+      assert.equal((await call('/sender/register', resetPayload)).status, 403);
+      assert.equal((await call('/sender/reset-password', { ...resetPayload, code: resetCode === '000000' ? '000001' : '000000' })).status, 403);
+      const resets = await Promise.all([call('/sender/reset-password', resetPayload), call('/sender/reset-password', resetPayload)]);
+      assert.deepEqual(resets.map(response => response.status).sort(), [200, 403]);
+      assert.equal((await call('/shares', undefined, previousSession)).status, 401);
+      assert.equal((await call('/sender/login', { email: owner, password })).status, 401);
+      assert.equal((await call('/sender/login', { email: owner, password: newPassword })).status, 200);
+    }
   } finally {
     child.kill();
     await stopped;
-    await database.query('DELETE FROM shares WHERE owner=$1', [email]);
-    await database.query('DELETE FROM sender_sessions WHERE owner IN ($1,$2)', [email, newEmail]);
-    await database.query('DELETE FROM sender_registration_challenges WHERE email=$1', [newEmail]);
-    await database.query('DELETE FROM sender_accounts WHERE email=$1', [newEmail]);
-    await database.end();
+    await admin.query('DROP SCHEMA ' + schema + ' CASCADE');
+    await admin.end();
     await rm(directory, {recursive:true,force:true});
   }
 });

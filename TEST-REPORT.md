@@ -37,3 +37,11 @@ the original Resend test account. Brevo recorded the signup email as Delivered.
 Both the Brevo and Resend integrations passed the local PostgreSQL integration
 suite with simulated delivery. Live SMS, rich DOCX layout fidelity, and managed
 object storage and key management are outside the verified classroom pilot.
+
+## Password reset verification
+
+The PostgreSQL integration suite passed with simulated Brevo and Resend
+delivery. Recovery was verified for registered senders and the configured
+pilot sender. Tests covered purpose-bound codes, wrong-code rejection,
+single redemption under concurrent requests, rejection of the old password,
+acceptance of the new password, and revocation of existing sender sessions.

@@ -213,7 +213,58 @@ class MainActivity : FragmentActivity() {
                                 status = ""
                                 nav.navigate("sender-register")
                             }) { Text("Create an account") }
+                            TextButton(enabled = !busy, onClick = {
+                                status = ""
+                                password = ""
+                                nav.navigate("sender-reset")
+                            }) { Text("Forgot password") }
                             TextButton(enabled = !busy, onClick = { status = ""; nav.popBackStack() }) { Text("Back") }
+                        }
+                    }
+                    composable("sender-reset") {
+                        var email by rememberSaveable { mutableStateOf(senderEmail) }
+                        var challenge by remember { mutableStateOf("") }
+                        var code by remember { mutableStateOf("") }
+                        var password by remember { mutableStateOf("") }
+                        var confirmation by remember { mutableStateOf("") }
+                        val awaitingCode = challenge.isNotEmpty()
+                        AccountScreen("Reset your password", if (awaitingCode)
+                            "If this email has an account, we’ll send a six-digit code. It expires in five minutes."
+                            else "Enter the email address you use to sign in.") {
+                            OutlinedTextField(email, { email = it }, modifier = Modifier.fillMaxWidth(),
+                                label = { Text("Email address") }, singleLine = true, enabled = !awaitingCode && !busy,
+                                keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(keyboardType = androidx.compose.ui.text.input.KeyboardType.Email))
+                            if (awaitingCode) {
+                                OutlinedTextField(code, { code = it.filter { digit -> digit in '0'..'9' }.take(6) },
+                                    modifier = Modifier.fillMaxWidth(), label = { Text("Email verification code") }, singleLine = true,
+                                    enabled = !busy,
+                                    keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(keyboardType = androidx.compose.ui.text.input.KeyboardType.Number))
+                                OutlinedTextField(password, { password = it }, modifier = Modifier.fillMaxWidth(),
+                                    label = { Text("New password") }, supportingText = { Text("At least 12 characters") },
+                                    singleLine = true, enabled = !busy, visualTransformation = PasswordVisualTransformation())
+                                OutlinedTextField(confirmation, { confirmation = it }, modifier = Modifier.fillMaxWidth(),
+                                    label = { Text("Confirm new password") }, singleLine = true, enabled = !busy,
+                                    visualTransformation = PasswordVisualTransformation(),
+                                    isError = confirmation.isNotEmpty() && confirmation != password,
+                                    supportingText = { if (confirmation.isNotEmpty() && confirmation != password) Text("Passwords must match") })
+                                Button(modifier = Modifier.fillMaxWidth(), enabled = !busy && code.length == 6 &&
+                                    password.length in 12..256 && password == confirmation, onClick = { run {
+                                    val reset = JSONObject().put("challenge", challenge).put("code", code).put("password", password)
+                                    request("/sender/reset-password", reset)
+                                    senderEmail = email.trim()
+                                    status = "Password reset. Sign in with your new password."
+                                    nav.popBackStack()
+                                } }) { Text("Reset password") }
+                                TextButton(enabled = !busy, onClick = { challenge = ""; code = ""; status = "" }) {
+                                    Text("Change email or request a new code")
+                                }
+                            } else {
+                                Button(modifier = Modifier.fillMaxWidth(), enabled = !busy && email.isNotBlank(), onClick = { run {
+                                    val result = request("/sender/reset-password/code", JSONObject().put("email", email.trim()))
+                                    challenge = JSONObject(result.decodeToString()).getString("challenge")
+                                } }) { Text("Send reset code") }
+                            }
+                            TextButton(enabled = !busy, onClick = { status = ""; nav.popBackStack() }) { Text("Back to sign in") }
                         }
                     }
                     composable("sender-register") {
