@@ -2,6 +2,7 @@ import { randomBytes, scrypt, timingSafeEqual } from 'node:crypto';
 import { promisify } from 'node:util';
 
 const derive = promisify(scrypt);
+const emailProvider = process.env.EMAIL_PROVIDER ?? 'resend';
 export const hosted = process.env.NODE_ENV === 'production';
 export const origin = process.env.PUBLIC_ORIGIN ?? process.env.RENDER_EXTERNAL_URL ?? '';
 export const account = process.env.SENDER_EMAIL?.trim().toLowerCase() ?? '';
@@ -11,9 +12,12 @@ const [salt, digest] = operatorPasswordHash.split(':');
 export function checkHostedConfig() {
   if (!hosted) return;
   const url = new URL(origin);
+  const emailConfigured = emailProvider === 'brevo'
+    ? Boolean(process.env.BREVO_API_KEY && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(process.env.BREVO_SENDER_EMAIL ?? ''))
+    : emailProvider === 'resend' && Boolean(process.env.RESEND_API_KEY && process.env.MAIL_FROM);
   if (url.protocol !== 'https:' || url.origin !== origin || !account ||
       !/^[\da-f]{32}$/i.test(salt ?? '') || !/^[\da-f]{128}$/i.test(digest ?? '') ||
-      !process.env.RESEND_API_KEY || !process.env.MAIL_FROM ||
+      !emailConfigured ||
       !/^(?:[0-9A-F]{2}:){31}[0-9A-F]{2}$/i.test(process.env.ANDROID_CERT_SHA256 ?? '') ||
       !process.env.ANDROID_INSTALL_URL?.startsWith('https://')) throw new Error('Incomplete hosted configuration');
 }
@@ -46,6 +50,15 @@ export async function deliver(to: string, subject: string, message: string, idem
       method: 'POST', signal,
       headers: { Authorization: 'Basic ' + Buffer.from(sid + ':' + process.env.TWILIO_AUTH_TOKEN).toString('base64') },
       body: new URLSearchParams({ To: to, From: process.env.TWILIO_FROM!, Body: message }),
+    });
+  } else if (emailProvider === 'brevo') {
+    response = await fetch('https://api.brevo.com/v3/smtp/email', {
+      method: 'POST', signal,
+      headers: { 'api-key': process.env.BREVO_API_KEY!, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        sender: { email: process.env.BREVO_SENDER_EMAIL, name: 'ShareSafe' },
+        to: [{ email: to }], subject, textContent: message,
+      }),
     });
   } else {
     response = await fetch('https://api.resend.com/emails', {
