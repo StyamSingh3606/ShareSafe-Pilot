@@ -2,6 +2,8 @@ package com.sharesafe.app
 
 import android.net.Uri
 import android.content.Intent
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.os.Bundle
 import android.os.SystemClock
 import android.provider.OpenableColumns
@@ -19,6 +21,10 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
@@ -53,7 +59,7 @@ class MainActivity : FragmentActivity() {
         captureInvitation(intent)
         cacheDir.listFiles()?.filter { it.name.startsWith("preview-") }?.forEach { it.delete() }
         window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
-        setContent { MaterialTheme { ShareSafe() } }
+        setContent { ShareSafeTheme { ShareSafe() } }
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -183,294 +189,350 @@ class MainActivity : FragmentActivity() {
         LaunchedEffect(pendingInvite) {
             if (pendingInvite != null) nav.navigate("receive") { launchSingleTop = true }
         }
-        Surface(Modifier.fillMaxSize()) {
-            Column(Modifier.safeDrawingPadding().padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                Text("ShareSafe", style = MaterialTheme.typography.headlineMedium)
-                if (status.isNotBlank()) Text(status)
-                if (busy) LinearProgressIndicator(Modifier.fillMaxWidth())
-                NavHost(nav, startDestination = "home") {
-                    composable("home") {
-                        Column {
-                            Button(onClick = { status = ""; nav.navigate(if (BuildConfig.DEBUG || senderSession.isNotBlank()) "send" else "sender-login") }) { Text("Send a file") }
-                            Button(onClick = { authenticate { nav.navigate("receive") } }) { Text("Receive a file") }
+        Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
+            Box(Modifier.fillMaxSize().safeDrawingPadding(), contentAlignment = Alignment.TopCenter) {
+                Column(Modifier.widthIn(max = 560.dp).fillMaxWidth().padding(horizontal = 20.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    ShareSafeHeader()
+                    if (status.isNotBlank()) Surface(
+                        modifier = Modifier.fillMaxWidth().semantics { liveRegion = LiveRegionMode.Polite },
+                        shape = MaterialTheme.shapes.medium, color = MaterialTheme.colorScheme.secondaryContainer,
+                    ) { Text(status, Modifier.padding(12.dp), style = MaterialTheme.typography.bodyMedium) }
+                    if (busy) LinearProgressIndicator(Modifier.fillMaxWidth())
+                    NavHost(nav, startDestination = "home", modifier = Modifier.weight(1f)) {
+                        composable("home") {
+                            ShareSafeHome(
+                                onSend = { status = ""; nav.navigate(if (BuildConfig.DEBUG || senderSession.isNotBlank()) "send" else "sender-login") },
+                                onReceive = { authenticate { nav.navigate("receive") } },
+                            )
                         }
-                    }
-                    composable("sender-login") {
-                        var password by remember { mutableStateOf("") }
-                        AccountScreen("Sign in", "Sign in to send files securely.") {
-                            OutlinedTextField(senderEmail, { senderEmail = it }, modifier = Modifier.fillMaxWidth(),
-                                label = { Text("Email address") }, singleLine = true,
-                                keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(keyboardType = androidx.compose.ui.text.input.KeyboardType.Email))
-                            OutlinedTextField(password, { password = it }, modifier = Modifier.fillMaxWidth(),
-                                label = { Text("Password") }, singleLine = true, visualTransformation = PasswordVisualTransformation())
-                            Button(modifier = Modifier.fillMaxWidth(), enabled = !busy && senderEmail.isNotBlank() && password.isNotBlank(), onClick = { run {
-                                val login = JSONObject().put("email", senderEmail.trim()).put("password", password)
-                                senderSession = JSONObject(request("/sender/login", login).decodeToString()).getString("session")
-                                password = ""
-                                nav.navigate("send") { popUpTo("sender-login") { inclusive = true } }
-                            } }) { Text("Sign in") }
-                            OutlinedButton(modifier = Modifier.fillMaxWidth(), enabled = !busy, onClick = {
-                                status = ""
-                                nav.navigate("sender-register")
-                            }) { Text("Create an account") }
-                            TextButton(enabled = !busy, onClick = {
-                                status = ""
-                                password = ""
-                                nav.navigate("sender-reset")
-                            }) { Text("Forgot password") }
-                            TextButton(enabled = !busy, onClick = { status = ""; nav.popBackStack() }) { Text("Back") }
-                        }
-                    }
-                    composable("sender-reset") {
-                        var email by rememberSaveable { mutableStateOf(senderEmail) }
-                        var challenge by remember { mutableStateOf("") }
-                        var code by remember { mutableStateOf("") }
-                        var password by remember { mutableStateOf("") }
-                        var confirmation by remember { mutableStateOf("") }
-                        val awaitingCode = challenge.isNotEmpty()
-                        AccountScreen("Reset your password", if (awaitingCode)
-                            "If this email has an account, we’ll send a six-digit code. It expires in five minutes."
-                            else "Enter the email address you use to sign in.") {
-                            OutlinedTextField(email, { email = it }, modifier = Modifier.fillMaxWidth(),
-                                label = { Text("Email address") }, singleLine = true, enabled = !awaitingCode && !busy,
-                                keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(keyboardType = androidx.compose.ui.text.input.KeyboardType.Email))
-                            if (awaitingCode) {
-                                OutlinedTextField(code, { code = it.filter { digit -> digit in '0'..'9' }.take(6) },
-                                    modifier = Modifier.fillMaxWidth(), label = { Text("Email verification code") }, singleLine = true,
-                                    enabled = !busy,
-                                    keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(keyboardType = androidx.compose.ui.text.input.KeyboardType.Number))
+                        composable("sender-login") {
+                            var password by remember { mutableStateOf("") }
+                            AccountScreen("Sign in", "Sign in to send files securely.") {
+                                OutlinedTextField(senderEmail, { senderEmail = it }, modifier = Modifier.fillMaxWidth(),
+                                    label = { Text("Email address") }, singleLine = true,
+                                    keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(keyboardType = androidx.compose.ui.text.input.KeyboardType.Email))
                                 OutlinedTextField(password, { password = it }, modifier = Modifier.fillMaxWidth(),
-                                    label = { Text("New password") }, supportingText = { Text("At least 12 characters") },
-                                    singleLine = true, enabled = !busy, visualTransformation = PasswordVisualTransformation())
-                                OutlinedTextField(confirmation, { confirmation = it }, modifier = Modifier.fillMaxWidth(),
-                                    label = { Text("Confirm new password") }, singleLine = true, enabled = !busy,
-                                    visualTransformation = PasswordVisualTransformation(),
-                                    isError = confirmation.isNotEmpty() && confirmation != password,
-                                    supportingText = { if (confirmation.isNotEmpty() && confirmation != password) Text("Passwords must match") })
-                                Button(modifier = Modifier.fillMaxWidth(), enabled = !busy && code.length == 6 &&
-                                    password.length in 12..256 && password == confirmation, onClick = { run {
-                                    val reset = JSONObject().put("challenge", challenge).put("code", code).put("password", password)
-                                    request("/sender/reset-password", reset)
-                                    senderEmail = email.trim()
-                                    status = "Password reset. Sign in with your new password."
-                                    nav.popBackStack()
-                                } }) { Text("Reset password") }
-                                TextButton(enabled = !busy, onClick = { challenge = ""; code = ""; status = "" }) {
-                                    Text("Change email or request a new code")
+                                    label = { Text("Password") }, singleLine = true, visualTransformation = PasswordVisualTransformation())
+                                Button(modifier = Modifier.fillMaxWidth(), enabled = !busy && senderEmail.isNotBlank() && password.isNotBlank(), onClick = { run {
+                                    val login = JSONObject().put("email", senderEmail.trim()).put("password", password)
+                                    senderSession = JSONObject(request("/sender/login", login).decodeToString()).getString("session")
+                                    password = ""
+                                    nav.navigate("send") { popUpTo("sender-login") { inclusive = true } }
+                                } }) { Text("Sign in") }
+                                OutlinedButton(modifier = Modifier.fillMaxWidth(), enabled = !busy, onClick = {
+                                    status = ""
+                                    nav.navigate("sender-register")
+                                }) { Text("Create an account") }
+                                TextButton(enabled = !busy, onClick = {
+                                    status = ""
+                                    password = ""
+                                    nav.navigate("sender-reset")
+                                }) { Text("Forgot password") }
+                                TextButton(enabled = !busy, onClick = { status = ""; nav.popBackStack() }) { Text("Back") }
+                            }
+                        }
+                        composable("sender-reset") {
+                            var email by rememberSaveable { mutableStateOf(senderEmail) }
+                            var challenge by remember { mutableStateOf("") }
+                            var code by remember { mutableStateOf("") }
+                            var password by remember { mutableStateOf("") }
+                            var confirmation by remember { mutableStateOf("") }
+                            val awaitingCode = challenge.isNotEmpty()
+                            AccountScreen("Reset your password", if (awaitingCode)
+                                "If this email has an account, we’ll send a six-digit code. It expires in five minutes."
+                                else "Enter the email address you use to sign in.") {
+                                OutlinedTextField(email, { email = it }, modifier = Modifier.fillMaxWidth(),
+                                    label = { Text("Email address") }, singleLine = true, enabled = !awaitingCode && !busy,
+                                    keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(keyboardType = androidx.compose.ui.text.input.KeyboardType.Email))
+                                if (awaitingCode) {
+                                    OutlinedTextField(code, { code = it.filter { digit -> digit in '0'..'9' }.take(6) },
+                                        modifier = Modifier.fillMaxWidth(), label = { Text("Email verification code") }, singleLine = true,
+                                        enabled = !busy,
+                                        keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(keyboardType = androidx.compose.ui.text.input.KeyboardType.Number))
+                                    OutlinedTextField(password, { password = it }, modifier = Modifier.fillMaxWidth(),
+                                        label = { Text("New password") }, supportingText = { Text("At least 12 characters") },
+                                        singleLine = true, enabled = !busy, visualTransformation = PasswordVisualTransformation())
+                                    OutlinedTextField(confirmation, { confirmation = it }, modifier = Modifier.fillMaxWidth(),
+                                        label = { Text("Confirm new password") }, singleLine = true, enabled = !busy,
+                                        visualTransformation = PasswordVisualTransformation(),
+                                        isError = confirmation.isNotEmpty() && confirmation != password,
+                                        supportingText = { if (confirmation.isNotEmpty() && confirmation != password) Text("Passwords must match") })
+                                    Button(modifier = Modifier.fillMaxWidth(), enabled = !busy && code.length == 6 &&
+                                        password.length in 12..256 && password == confirmation, onClick = { run {
+                                        val reset = JSONObject().put("challenge", challenge).put("code", code).put("password", password)
+                                        request("/sender/reset-password", reset)
+                                        senderEmail = email.trim()
+                                        status = "Password reset. Sign in with your new password."
+                                        nav.popBackStack()
+                                    } }) { Text("Reset password") }
+                                    TextButton(enabled = !busy, onClick = { challenge = ""; code = ""; status = "" }) {
+                                        Text("Change email or request a new code")
+                                    }
+                                } else {
+                                    Button(modifier = Modifier.fillMaxWidth(), enabled = !busy && email.isNotBlank(), onClick = { run {
+                                        val result = request("/sender/reset-password/code", JSONObject().put("email", email.trim()))
+                                        challenge = JSONObject(result.decodeToString()).getString("challenge")
+                                    } }) { Text("Send reset code") }
                                 }
-                            } else {
-                                Button(modifier = Modifier.fillMaxWidth(), enabled = !busy && email.isNotBlank(), onClick = { run {
-                                    val result = request("/sender/reset-password/code", JSONObject().put("email", email.trim()))
-                                    challenge = JSONObject(result.decodeToString()).getString("challenge")
-                                } }) { Text("Send reset code") }
-                            }
-                            TextButton(enabled = !busy, onClick = { status = ""; nav.popBackStack() }) { Text("Back to sign in") }
-                        }
-                    }
-                    composable("sender-register") {
-                        var email by rememberSaveable { mutableStateOf(senderEmail) }
-                        var password by remember { mutableStateOf("") }
-                        var confirmation by remember { mutableStateOf("") }
-                        var challenge by remember { mutableStateOf("") }
-                        var code by remember { mutableStateOf("") }
-                        val awaitingCode = challenge.isNotEmpty()
-                        AccountScreen("Create a sender account", if (awaitingCode) "Enter the six-digit verification code sent to your email." else "Use an email address you can access.") {
-                            OutlinedTextField(email, { email = it }, modifier = Modifier.fillMaxWidth(),
-                                label = { Text("Email address") }, singleLine = true, enabled = !awaitingCode && !busy,
-                                keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(keyboardType = androidx.compose.ui.text.input.KeyboardType.Email))
-                            if (awaitingCode) {
-                                OutlinedTextField(code, { code = it.filter { digit -> digit in '0'..'9' }.take(6) },
-                                    modifier = Modifier.fillMaxWidth(), label = { Text("Email verification code") }, singleLine = true,
-                                    keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(keyboardType = androidx.compose.ui.text.input.KeyboardType.Number))
-                                Button(modifier = Modifier.fillMaxWidth(), enabled = !busy && code.length == 6, onClick = { run {
-                                    val registration = JSONObject().put("challenge", challenge).put("code", code).put("password", password)
-                                    request("/sender/register", registration)
-                                    senderEmail = email.trim()
-                                    status = "Email verified. Sign in to continue."
-                                    nav.popBackStack()
-                                } }) { Text("Verify and create account") }
-                                TextButton(enabled = !busy, onClick = { challenge = ""; code = ""; status = "" }) { Text("Change email or request a new code") }
-                            } else {
-                                OutlinedTextField(password, { password = it }, modifier = Modifier.fillMaxWidth(),
-                                    label = { Text("Password") }, supportingText = { Text("At least 12 characters") },
-                                    singleLine = true, enabled = !busy, visualTransformation = PasswordVisualTransformation())
-                                OutlinedTextField(confirmation, { confirmation = it }, modifier = Modifier.fillMaxWidth(),
-                                    label = { Text("Confirm password") }, singleLine = true, enabled = !busy,
-                                    visualTransformation = PasswordVisualTransformation(),
-                                    isError = confirmation.isNotEmpty() && confirmation != password,
-                                    supportingText = { if (confirmation.isNotEmpty() && confirmation != password) Text("Passwords must match") })
-                                Button(modifier = Modifier.fillMaxWidth(), enabled = !busy && email.isNotBlank() &&
-                                    password.length in 12..256 && password == confirmation, onClick = { run {
-                                    val result = request("/sender/register/code", JSONObject().put("email", email.trim()))
-                                    challenge = JSONObject(result.decodeToString()).getString("challenge")
-                                } }) { Text("Send verification code") }
-                            }
-                            TextButton(enabled = !busy, onClick = { status = ""; nav.popBackStack() }) { Text("Back to sign in") }
-                        }
-                    }
-                    composable("send") {
-                        LaunchedEffect(senderSession) {
-                            if (!BuildConfig.DEBUG && senderSession.isBlank()) {
-                                nav.navigate("sender-login") { popUpTo("send") { inclusive = true } }
+                                TextButton(enabled = !busy, onClick = { status = ""; nav.popBackStack() }) { Text("Back to sign in") }
                             }
                         }
-                        var access by remember { mutableStateOf("") }
-                        var recipient by rememberSaveable { mutableStateOf("") }
-                        var minutes by rememberSaveable { mutableStateOf("15") }
-                        var timed by rememberSaveable { mutableStateOf(true) }
-                        var uri by rememberSaveable { mutableStateOf<Uri?>(null) }
-                        var name by rememberSaveable { mutableStateOf("") }
-                        var size by rememberSaveable { mutableLongStateOf(-1) }
-                        var id by rememberSaveable { mutableStateOf("") }
-                        var invitation by rememberSaveable { mutableStateOf("") }
-                        val pick = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { selected ->
-                            if (selected != null) {
-                                contentResolver.takePersistableUriPermission(selected, android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                                uri = selected
-                                name = ""; size = -1
-                                id = UUID.randomUUID().toString()
-                                invitation = ""
-                                contentResolver.query(selected, arrayOf(OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE), null, null, null)?.use {
-                                    if (it.moveToFirst()) {
-                                        name = it.getString(0)
-                                        size = if (it.isNull(1)) -1 else it.getLong(1)
+                        composable("sender-register") {
+                            var email by rememberSaveable { mutableStateOf(senderEmail) }
+                            var password by remember { mutableStateOf("") }
+                            var confirmation by remember { mutableStateOf("") }
+                            var challenge by remember { mutableStateOf("") }
+                            var code by remember { mutableStateOf("") }
+                            val awaitingCode = challenge.isNotEmpty()
+                            AccountScreen("Create a sender account", if (awaitingCode) "Enter the six-digit verification code sent to your email." else "Use an email address you can access.") {
+                                OutlinedTextField(email, { email = it }, modifier = Modifier.fillMaxWidth(),
+                                    label = { Text("Email address") }, singleLine = true, enabled = !awaitingCode && !busy,
+                                    keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(keyboardType = androidx.compose.ui.text.input.KeyboardType.Email))
+                                if (awaitingCode) {
+                                    OutlinedTextField(code, { code = it.filter { digit -> digit in '0'..'9' }.take(6) },
+                                        modifier = Modifier.fillMaxWidth(), label = { Text("Email verification code") }, singleLine = true,
+                                        keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(keyboardType = androidx.compose.ui.text.input.KeyboardType.Number))
+                                    Button(modifier = Modifier.fillMaxWidth(), enabled = !busy && code.length == 6, onClick = { run {
+                                        val registration = JSONObject().put("challenge", challenge).put("code", code).put("password", password)
+                                        request("/sender/register", registration)
+                                        senderEmail = email.trim()
+                                        status = "Email verified. Sign in to continue."
+                                        nav.popBackStack()
+                                    } }) { Text("Verify and create account") }
+                                    TextButton(enabled = !busy, onClick = { challenge = ""; code = ""; status = "" }) { Text("Change email or request a new code") }
+                                } else {
+                                    OutlinedTextField(password, { password = it }, modifier = Modifier.fillMaxWidth(),
+                                        label = { Text("Password") }, supportingText = { Text("At least 12 characters") },
+                                        singleLine = true, enabled = !busy, visualTransformation = PasswordVisualTransformation())
+                                    OutlinedTextField(confirmation, { confirmation = it }, modifier = Modifier.fillMaxWidth(),
+                                        label = { Text("Confirm password") }, singleLine = true, enabled = !busy,
+                                        visualTransformation = PasswordVisualTransformation(),
+                                        isError = confirmation.isNotEmpty() && confirmation != password,
+                                        supportingText = { if (confirmation.isNotEmpty() && confirmation != password) Text("Passwords must match") })
+                                    Button(modifier = Modifier.fillMaxWidth(), enabled = !busy && email.isNotBlank() &&
+                                        password.length in 12..256 && password == confirmation, onClick = { run {
+                                        val result = request("/sender/register/code", JSONObject().put("email", email.trim()))
+                                        challenge = JSONObject(result.decodeToString()).getString("challenge")
+                                    } }) { Text("Send verification code") }
+                                }
+                                TextButton(enabled = !busy, onClick = { status = ""; nav.popBackStack() }) { Text("Back to sign in") }
+                            }
+                        }
+                        composable("send") {
+                            LaunchedEffect(senderSession) {
+                                if (!BuildConfig.DEBUG && senderSession.isBlank()) {
+                                    nav.navigate("sender-login") { popUpTo("send") { inclusive = true } }
+                                }
+                            }
+                            var access by remember { mutableStateOf("") }
+                            var recipient by rememberSaveable { mutableStateOf("") }
+                            var minutes by rememberSaveable { mutableStateOf("15") }
+                            var timed by rememberSaveable { mutableStateOf(true) }
+                            var uri by rememberSaveable { mutableStateOf<Uri?>(null) }
+                            var name by rememberSaveable { mutableStateOf("") }
+                            var size by rememberSaveable { mutableLongStateOf(-1) }
+                            var id by rememberSaveable { mutableStateOf("") }
+                            var invitation by rememberSaveable { mutableStateOf("") }
+                            val pick = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { selected ->
+                                if (selected != null) {
+                                    contentResolver.takePersistableUriPermission(selected, android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                    uri = selected
+                                    name = ""; size = -1
+                                    id = UUID.randomUUID().toString()
+                                    invitation = ""
+                                    contentResolver.query(selected, arrayOf(OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE), null, null, null)?.use {
+                                        if (it.moveToFirst()) {
+                                            name = it.getString(0)
+                                            size = if (it.isNull(1)) -1 else it.getLong(1)
+                                        }
                                     }
                                 }
                             }
-                        }
-                        Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                            if (BuildConfig.DEBUG) {
-                                OutlinedTextField(access, { access = it }, label = { Text("Sender access token") }, visualTransformation = PasswordVisualTransformation())
-                            } else {
-                                TextButton(enabled = !busy, onClick = {
-                                    senderSession = ""
-                                }) { Text("Sign out") }
-                            }
-                            Button(onClick = { pick.launch(arrayOf("application/pdf", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", "audio/*")) }) { Text("Choose file") }
-                            if (name.isNotBlank()) Text(if (size >= 0) name + " · " + size + " bytes" else name)
-                            OutlinedTextField(recipient, { recipient = it }, label = { Text("Recipient email or international phone") })
-                            Row { Checkbox(timed, { timed = it }); Text("Time-limited access") }
-                            if (timed) OutlinedTextField(minutes, { minutes = it }, label = { Text("Minutes (1–10,080)") })
-                            Button(enabled = !busy && uri != null && invitation.isEmpty() && (access.isNotBlank() || senderSession.isNotBlank()), onClick = {
-                                run {
-                                    val duration = if (timed) (minutes.toIntOrNull()?.takeIf { it in 1..10080 }
-                                        ?: error("Choose a valid duration")) * 60 else null
-                                    val result = upload(checkNotNull(uri), id, name, recipient.trim(), duration, if (BuildConfig.DEBUG) access.trim() else senderSession)
-                                    invitation = result.first
-                                    if (!BuildConfig.DEBUG) status = if (result.second) "Invitation submitted for delivery" else "Delivery failed. Copy the invitation and send it to the intended recipient."
-
+                            Column(Modifier.fillMaxWidth().imePadding().verticalScroll(rememberScrollState()).padding(bottom = 20.dp),
+                                verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                                FlowHeading("Send a file", "Choose a file, a recipient, and how long they can access it.")
+                                if (BuildConfig.DEBUG) {
+                                    OutlinedTextField(access, { access = it }, label = { Text("Sender access token") }, visualTransformation = PasswordVisualTransformation())
+                                } else {
+                                    TextButton(enabled = !busy, onClick = {
+                                        senderSession = ""
+                                    }) { Text("Sign out") }
                                 }
-                            }) { Text("Encrypt and publish") }
-                            if (invitation.isNotEmpty()) androidx.compose.foundation.text.selection.SelectionContainer { Text(invitation) }
-                            TextButton(onClick = { nav.popBackStack() }) { Text("Back") }
-                        }
-                    }
-                    composable("receive") {
-                        var invite by rememberSaveable { mutableStateOf("") }
-                        var receiver by rememberSaveable { mutableStateOf(UUID.randomUUID().toString()) }
-                        var destination by remember { mutableStateOf("") }
-                        var code by remember { mutableStateOf("") }
-                        var session by remember { mutableStateOf("") }
-                        var timed by remember { mutableStateOf(true) }
-                        var format by remember { mutableStateOf("") }
-                        var previewGeneration by remember { mutableIntStateOf(0) }
-                        var deadline by remember { mutableLongStateOf(0L) }
-                        var remaining by remember { mutableLongStateOf(0L) }
-                        var file by remember { mutableStateOf<File?>(null) }
-                        val save = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
-                            val target = result.data?.data?.takeIf { result.resultCode == RESULT_OK }
-                            if (target != null && unlocked && !timed && session.isNotEmpty()) run {
-                                val bytes = request("/receive/" + invite + "/content/download", token = session)
-                                withContext(Dispatchers.IO) { contentResolver.openOutputStream(target, "wt")?.use { it.write(bytes) } ?: error("Save failed") }
-                                status = "File saved"
+                                FlowPanel {
+                                    Text("File", style = MaterialTheme.typography.titleMedium)
+                                    if (name.isNotBlank()) Text(if (size >= 0) name + " · " + size + " bytes" else name)
+                                    else Text("PDF, DOCX, MP3 or WAV · Up to 25 MB", style = MaterialTheme.typography.bodyMedium)
+                                    OutlinedButton(enabled = !busy, modifier = Modifier.fillMaxWidth(),
+                                        onClick = { pick.launch(arrayOf("application/pdf", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", "audio/*")) }) { Text("Choose file") }
+                                }
+                                FlowPanel {
+                                    Text("Recipient", style = MaterialTheme.typography.titleMedium)
+                                    OutlinedTextField(recipient, { recipient = it }, Modifier.fillMaxWidth(), enabled = !busy,
+                                        label = { Text("Recipient email or international phone") }, singleLine = true)
+                                }
+                                FlowPanel {
+                                    Text("Access", style = MaterialTheme.typography.titleMedium)
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Checkbox(timed, { timed = it }, enabled = !busy)
+                                        Text("Time-limited access")
+                                    }
+                                    Text(if (timed) "The recipient can preview the file until access ends." else "The recipient can preview and download the original.",
+                                        style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    if (timed) OutlinedTextField(minutes, { minutes = it.filter { digit -> digit in '0'..'9' }.take(5) },
+                                        Modifier.fillMaxWidth(), enabled = !busy, label = { Text("Minutes (1–10,080)") }, singleLine = true,
+                                        keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(keyboardType = androidx.compose.ui.text.input.KeyboardType.Number))
+                                }
+                                Button(modifier = Modifier.fillMaxWidth(), enabled = !busy && uri != null && recipient.isNotBlank() && invitation.isEmpty() && (access.isNotBlank() || senderSession.isNotBlank()), onClick = {
+                                    run {
+                                        val duration = if (timed) (minutes.toIntOrNull()?.takeIf { it in 1..10080 }
+                                            ?: error("Choose a valid duration")) * 60 else null
+                                        val result = upload(checkNotNull(uri), id, name, recipient.trim(), duration, if (BuildConfig.DEBUG) access.trim() else senderSession)
+                                        invitation = result.first
+                                        if (!BuildConfig.DEBUG) status = if (result.second) "Invitation submitted for delivery" else "Delivery failed. Copy the invitation and send it to the intended recipient."
+
+                                    }
+                                }) { Text("Encrypt and publish") }
+                                if (invitation.isNotEmpty()) FlowPanel {
+                                    Text("Invitation", style = MaterialTheme.typography.titleMedium)
+                                    androidx.compose.foundation.text.selection.SelectionContainer {
+                                        Text(invitation, style = MaterialTheme.typography.bodySmall)
+                                    }
+                                    OutlinedButton(modifier = Modifier.fillMaxWidth(), onClick = {
+                                        getSystemService(ClipboardManager::class.java).setPrimaryClip(ClipData.newPlainText("ShareSafe invitation", invitation))
+                                        status = "Invitation copied"
+                                    }) { Text("Copy invitation") }
+                                }
+                                TextButton(onClick = { nav.popBackStack() }) { Text("Back") }
                             }
                         }
-                        LaunchedEffect(pendingInvite, unlocked) {
-                            if (!unlocked) {
+                        composable("receive") {
+                            var invite by rememberSaveable { mutableStateOf("") }
+                            var receiver by rememberSaveable { mutableStateOf(UUID.randomUUID().toString()) }
+                            var destination by remember { mutableStateOf("") }
+                            var code by remember { mutableStateOf("") }
+                            var session by remember { mutableStateOf("") }
+                            var timed by remember { mutableStateOf(true) }
+                            var format by remember { mutableStateOf("") }
+                            var previewGeneration by remember { mutableIntStateOf(0) }
+                            var deadline by remember { mutableLongStateOf(0L) }
+                            var remaining by remember { mutableLongStateOf(0L) }
+                            var file by remember { mutableStateOf<File?>(null) }
+                            val save = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+                                val target = result.data?.data?.takeIf { result.resultCode == RESULT_OK }
+                                if (target != null && unlocked && !timed && session.isNotEmpty()) run {
+                                    val bytes = request("/receive/" + invite + "/content/download", token = session)
+                                    withContext(Dispatchers.IO) { contentResolver.openOutputStream(target, "wt")?.use { it.write(bytes) } ?: error("Save failed") }
+                                    status = "File saved"
+                                }
+                            }
+                            LaunchedEffect(pendingInvite, unlocked) {
+                                if (!unlocked) {
+                                    session = ""
+                                    file = null
+                                    destination = ""
+                                    code = ""
+                                    deadline = 0
+                                    previewGeneration++
+                                } else pendingInvite?.let {
+                                    invite = it
+                                    pendingInvite = null
+                                }
+                            }
+                            LaunchedEffect(deadline, unlocked) {
+                                if (unlocked && deadline == 0L) return@LaunchedEffect
+                                while (unlocked && deadline > 0) {
+                                    remaining = (deadline - SystemClock.elapsedRealtime()).coerceAtLeast(0)
+                                    if (remaining == 0L) break
+                                    delay(250)
+                                }
                                 session = ""
                                 file = null
-                                destination = ""
-                                code = ""
-                                deadline = 0
-                                previewGeneration++
-                            } else pendingInvite?.let {
-                                invite = it
-                                pendingInvite = null
                             }
-                        }
-                        LaunchedEffect(deadline, unlocked) {
-                            if (unlocked && deadline == 0L) return@LaunchedEffect
-                            while (unlocked && deadline > 0) {
-                                remaining = (deadline - SystemClock.elapsedRealtime()).coerceAtLeast(0)
-                                if (remaining == 0L) break
-                                delay(250)
-                            }
-                            session = ""
-                            file = null
-                        }
-                        if (!unlocked) {
-                            Button(onClick = { authenticate {} }) { Text("Unlock Receive") }
-                        } else Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                            OutlinedTextField(invite, { invite = it.trim(); destination = ""; session = ""; file = null; previewGeneration++ }, label = { Text("Invitation code") })
-                            Button(enabled = !busy, onClick = {
-                                run {
-                                    check(invite.matches(Regex("[A-Za-z0-9_-]{43}"))) { "Enter a valid invitation" }
-                                    val info = JSONObject(request("/receive/" + invite).decodeToString())
-                                    destination = info.getString("destination")
-                                    timed = info.getBoolean("timed")
-                                    format = info.optString("format")
+                            if (!unlocked) {
+                                AccountScreen("Receive a file", "Unlock with your phone’s biometric prompt to continue.") {
+                                    Button(modifier = Modifier.fillMaxWidth(), onClick = { authenticate {} }) { Text("Unlock Receive") }
+                                    TextButton(onClick = { pendingInvite = null; status = ""; nav.popBackStack() }) { Text("Back") }
                                 }
-                            }) { Text("Open invitation") }
-                            if (destination.isNotEmpty() && session.isEmpty()) {
-                                Text("Verification destination " + destination)
-                                Button(enabled = !busy, onClick = { run {
-                                    request("/receive/" + invite + "/code", JSONObject().put("receiver", receiver))
-                                    status = "Verification code requested"
-                                } }) { Text("Request code") }
-                                OutlinedTextField(code, { code = it.take(6) }, label = { Text("Verification code") }, singleLine = true, keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(keyboardType = androidx.compose.ui.text.input.KeyboardType.Number))
-                                Button(enabled = !busy, onClick = { run {
-                                    val start = SystemClock.elapsedRealtime()
-                                    val result = JSONObject(request("/receive/" + invite + "/verify",
-                                        JSONObject().put("receiver", receiver).put("code", code)).decodeToString())
-                                    format = result.optString("format", format)
-                                    deadline = start + result.getLong("remainingMs")
-                                    session = result.getString("session")
-                                    code = ""
-                                } }) { Text("Verify") }
+                            } else Column(Modifier.fillMaxWidth().imePadding().verticalScroll(rememberScrollState()).padding(bottom = 20.dp),
+                                verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                                FlowHeading("Receive a file", "Open the invitation and verify your access.")
+                                FlowPanel {
+                                    OutlinedTextField(invite, { entered ->
+                                        val value = entered.trim()
+                                        val pastedLink = Uri.parse(value)
+                                        val api = Uri.parse(BuildConfig.API_URL)
+                                        invite = if (pastedLink.scheme == "https" && pastedLink.host == api.host &&
+                                            pastedLink.port == api.port && pastedLink.pathSegments.size == 2 &&
+                                            pastedLink.pathSegments.first() == "i") pastedLink.lastPathSegment.orEmpty()
+                                            else value
+                                        destination = ""; session = ""; file = null; previewGeneration++
+                                    }, modifier = Modifier.fillMaxWidth(), enabled = !busy, label = { Text("Invitation code") },
+                                        supportingText = { Text("Paste the invitation link or its code.") })
+                                    Button(modifier = Modifier.fillMaxWidth(), enabled = !busy && invite.isNotBlank(), onClick = {
+                                        run {
+                                            check(invite.matches(Regex("[A-Za-z0-9_-]{43}"))) { "Enter a valid invitation" }
+                                            val info = JSONObject(request("/receive/" + invite).decodeToString())
+                                            destination = info.getString("destination")
+                                            timed = info.getBoolean("timed")
+                                            format = info.optString("format")
+                                        }
+                                    }) { Text("Open invitation") }
+                                }
+                                if (destination.isNotEmpty() && session.isEmpty()) FlowPanel {
+                                    Text("Verification destination " + destination, style = MaterialTheme.typography.titleMedium)
+                                    Button(enabled = !busy, onClick = { run {
+                                        request("/receive/" + invite + "/code", JSONObject().put("receiver", receiver))
+                                        status = "Verification code requested"
+                                    } }) { Text("Request code") }
+                                    OutlinedTextField(code, { code = it.filter { digit -> digit in '0'..'9' }.take(6) }, Modifier.fillMaxWidth(), label = { Text("Verification code") }, singleLine = true, keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(keyboardType = androidx.compose.ui.text.input.KeyboardType.Number))
+                                    Button(modifier = Modifier.fillMaxWidth(), enabled = !busy && code.length == 6, onClick = { run {
+                                        val start = SystemClock.elapsedRealtime()
+                                        val result = JSONObject(request("/receive/" + invite + "/verify",
+                                            JSONObject().put("receiver", receiver).put("code", code)).decodeToString())
+                                        format = result.optString("format", format)
+                                        deadline = start + result.getLong("remainingMs")
+                                        session = result.getString("session")
+                                        code = ""
+                                    } }) { Text("Verify") }
+                                }
+                                if (session.isNotEmpty()) {
+                                    FlowPanel {
+                                        Text("File access verified", style = MaterialTheme.typography.titleMedium)
+                                        if (timed) Text("Access remaining " + (remaining / 1000) + " seconds")
+                                        Button(enabled = !busy && file == null, onClick = { run {
+                                            val generation = previewGeneration
+                                            val originalSession = session
+                                            val bytes = request("/receive/" + invite + "/content/preview", token = originalSession)
+                                            if (unlocked && generation == previewGeneration && session == originalSession && SystemClock.elapsedRealtime() < deadline) {
+                                                val staged = withContext(Dispatchers.IO) { File.createTempFile("preview-", "." + format, cacheDir).apply { writeBytes(bytes) } }
+                                                if (unlocked && generation == previewGeneration && session == originalSession && SystemClock.elapsedRealtime() < deadline) file = staged
+                                                else staged.delete()
+                                            }
+                                        } }) { Text("Open preview") }
+                                        if (!timed) Button(enabled = !busy, onClick = {
+                                            val mimeType = when (format) {
+                                                "pdf" -> "application/pdf"
+                                                "docx" -> "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                                                "mp3" -> "audio/mpeg"
+                                                "wav" -> "audio/wav"
+                                                else -> null
+                                            }
+                                            if (mimeType == null) {
+                                                status = "This file type cannot be saved"
+                                            } else {
+                                                save.launch(Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
+                                                    addCategory(Intent.CATEGORY_OPENABLE)
+                                                    type = mimeType
+                                                    putExtra(Intent.EXTRA_TITLE, "ShareSafe." + format)
+                                                })
+                                            }
+                                        }) { Text("Download original") }
+                                    }
+                                    file?.let { Preview(it, format) }
+                                }
+                                TextButton(onClick = { pendingInvite = null; unlocked = false; nav.popBackStack() }) { Text("Back") }
                             }
-                            if (session.isNotEmpty()) {
-                                if (timed) Text("Access remaining " + (remaining / 1000) + " seconds")
-                                Button(enabled = !busy && file == null, onClick = { run {
-                                    val generation = previewGeneration
-                                    val originalSession = session
-                                    val bytes = request("/receive/" + invite + "/content/preview", token = originalSession)
-                                    if (unlocked && generation == previewGeneration && session == originalSession && SystemClock.elapsedRealtime() < deadline) {
-                                        val staged = withContext(Dispatchers.IO) { File.createTempFile("preview-", "." + format, cacheDir).apply { writeBytes(bytes) } }
-                                        if (unlocked && generation == previewGeneration && session == originalSession && SystemClock.elapsedRealtime() < deadline) file = staged
-                                        else staged.delete()
-                                    }
-                                } }) { Text("Open preview") }
-                                if (!timed) Button(enabled = !busy, onClick = {
-                                    val mimeType = when (format) {
-                                        "pdf" -> "application/pdf"
-                                        "docx" -> "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-                                        "mp3" -> "audio/mpeg"
-                                        "wav" -> "audio/wav"
-                                        else -> null
-                                    }
-                                    if (mimeType == null) {
-                                        status = "This file type cannot be saved"
-                                    } else {
-                                        save.launch(Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
-                                            addCategory(Intent.CATEGORY_OPENABLE)
-                                            type = mimeType
-                                            putExtra(Intent.EXTRA_TITLE, "ShareSafe." + format)
-                                        })
-                                    }
-                                }) { Text("Download original") }
-                                file?.let { Preview(it, format) }
-                            }
-                            TextButton(onClick = { pendingInvite = null; unlocked = false; nav.popBackStack() }) { Text("Back") }
                         }
                     }
                 }
@@ -480,11 +542,10 @@ class MainActivity : FragmentActivity() {
 
     @Composable
     private fun AccountScreen(title: String, description: String, content: @Composable ColumnScope.() -> Unit) {
-        Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).imePadding(),
-            verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            Text(title, style = MaterialTheme.typography.headlineSmall)
-            Text(description, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            content()
+        Column(Modifier.fillMaxWidth().imePadding().verticalScroll(rememberScrollState()).padding(bottom = 20.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp)) {
+            FlowHeading(title, description)
+            FlowPanel(content)
         }
     }
 

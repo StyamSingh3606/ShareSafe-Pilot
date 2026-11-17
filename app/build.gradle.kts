@@ -10,8 +10,8 @@ android {
         applicationId = "com.sharesafe.app"
         minSdk = 30
         targetSdk = 35
-        versionCode = 2
-        versionName = "0.2"
+        versionCode = 3
+        versionName = "0.3"
         val endpoint = providers.gradleProperty("shareSafeBaseUrl").orElse("").get()
         require(endpoint.isEmpty() || Regex("https://[A-Za-z0-9.-]+").matches(endpoint)) { "Use the public HTTPS origin without a trailing slash" }
         manifestPlaceholders["shareSafeLinkHost"] = endpoint.removePrefix("https://").ifEmpty { "sharesafe.invalid" }
